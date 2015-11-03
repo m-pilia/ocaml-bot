@@ -161,13 +161,14 @@ def evaluate(chatId, s):
         s      - string to be evaluated by the OCaml shell
     """
     p = None
+    chatsLock.acquire()
     try:
-        chatsLock.acquire()
         p = chats[chatId][_PIPE]
-        chatsLock.release()
     except KeyError as e:
+        chatsLock.release()
         logging.exception(e)
         return
+    chatsLock.release()
 
     try:
         p.stdin.write((s + "\n").encode('utf-8'))
@@ -212,11 +213,13 @@ def readResult(chatId):
             # add line to the buffer
             text = chats[chatId][_MSG]
             chats[chatId][_MSG] = text + line.decode('utf-8')
+        except KeyError as e:
             chats[chatId][_LOCK].release() # critical section end
             chatsLock.release()
-        except KeyError as e:
             logging.exception(e)
             continue
+        chats[chatId][_LOCK].release() # critical section end
+        chatsLock.release()
 
 def sendAnswer(chatId):
     """ Send answer messages.
@@ -224,9 +227,9 @@ def sendAnswer(chatId):
         chatId - id of the chat
     """
     while True:
+        chatsLock.acquire()
+        chats[chatId][_LOCK].acquire() # critical section start
         try:
-            chatsLock.acquire()
-            chats[chatId][_LOCK].acquire() # critical section start
             # check condition for thread termination
             if chats[chatId][_COND]:
                 chats[chatId][_LOCK].release()
@@ -236,11 +239,13 @@ def sendAnswer(chatId):
             # read message buffer for the chat and clear it after
             msg = chats[chatId][_MSG]
             chats[chatId][_MSG] = ""
-            chats[chatId][_LOCK].release() # critical section end
-            chatsLock.release()
         except Exception as e:
+            chats[chatId][_LOCK].release()
+            chatsLock.release()
             logging.exception(e)
             pass
+        chats[chatId][_LOCK].release() # critical section end
+        chatsLock.release()
         # send message
         if msg != "":
             sendMessage(chatId, msg)
@@ -252,13 +257,14 @@ def clearChat(chatId):
     the chat from the chats dictionary.
     """
     chat = None
+    chatsLock.acquire()
     try:
-        chatsLock.acquire()
         chat = chats[chatId]
-        chatsLock.release()
     except KeyError as e:
+        chatsLock.release()
         logging.exception(e)
         return
+    chatsLock.release()
 
     # close ocaml shell process
     p = chat[_PIPE]
@@ -301,8 +307,8 @@ def chatTimeoutKiller():
         try:
             inact = [c for (k, c) in chats.items() if t - c[_LAST] > _TIMEOUT]
         except Exception as e:
-            logging.exception(e)
             chatsLock.release()
+            logging.exception(e)
             continue
         chatsLock.release()
 
@@ -385,7 +391,6 @@ while True:
 
             # update timestamp for last received message
             chats[chatId][_LAST] = time.time()
-            
             chatsLock.release()
 
             if re.match("^/help.*", msg):
