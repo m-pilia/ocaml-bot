@@ -24,10 +24,14 @@ There is a couple of threads constantly running for each chat:
 The buffer variable is shared and synchronized between each couple of
 threads.
 
+Chats which are inactive by a certain time are closed automatically. A
+thread periodically chechs for inactivity.
+
 Run
 =====
 ```bash
-python ocaml_bot.py <bot_auth_token> [--debug] [--timeout=]
+python ocaml_bot.py <bot_auth_token> [--log=debug|info|error] [--timeout=] 
+[--logfile=]
 ```
 The timeout switch sets the time before a chat is killed for inactivity.
 

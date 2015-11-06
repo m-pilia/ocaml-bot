@@ -21,7 +21,7 @@
 #                                        [--logfile=]
 #                                        [--timeout=]
 #
-# This is a Telegram bot capable of interpreting OCaml code. Requires Python 3
+# This is a Telegram bot capable to interpret OCaml code. Requires Python 3
 # (with requests module) and ocaml.
 #
 # The program gets incoming messages from the Telegram server through long
@@ -35,6 +35,8 @@
 # - the other thread periodically sends the output back as a chat message.
 # The buffer variable is shared and synchronized between each couple of
 # threads.
+# Chats which are inactive by a certain time are closed automatically. A
+# thread periodically chechs for inactivity.
 #
 # Written by Martino on 2015-10-26
 """
@@ -103,6 +105,7 @@ baseAddr = ("https://api.telegram.org/bot" + token)
 
 # Command to open the OCaml shell.
 # TERM='console' ensures no format sequence is added to the interpreter output.
+# Changing this variable should allow to run other languages than OCaml.
 ocamlArgs = "TERM='console' ocaml -noprompt -nopromptcont"
 
 # Regex to parse a request for the interpreter.
