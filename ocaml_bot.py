@@ -98,7 +98,7 @@ logging.basicConfig(level=logLevel, filename=logFile)
 # Get bot token from first arg.
 token = ""
 if len(sys.argv) < 2 or re.match("--", sys.argv[1]):
-    print("usage: ocaml_bot <bot_auth_token> " +
+    print("usage: ocaml_bot <bot_auth_token> "
           "[--log=debug|info|error] [--logfile=] [--timeout=]")
     exit(1)
 else:
@@ -116,9 +116,9 @@ ocamlArgs = "TERM='console' ocaml -noprompt -nopromptcont"
 instruction = re.compile("^/ml ([\s\S]*)$")
 
 # Regex to match potentially harmful instructions.
-hazard = re.compile(".*([Ss]ys|[Uu]nix|[Ss]tream|fork|exec|" +
-                        "#\s*cd|#\s*directory|#\s*install_printer|" +
-                        "fprintf|input_file|output_file|open_in|open_out).*")
+hazard = re.compile(".*([Ss]ys|[Uu]nix|[Ss]tream|fork|exec|"
+                    "#\s*cd|#\s*directory|#\s*install_printer|"
+                    "fprintf|input_file|output_file|open_in|open_out).*")
 
 # Memorize last update_id value, used for the offset parameter.
 # Items are discarded by the server when the offset parameter is greater than
@@ -179,6 +179,7 @@ def evaluate(chatId, s):
     """
     # Get the pipe object for the chat, and add the command to the history.
     p = None
+
     chatsLock.acquire()
     try:
         p = chats[chatId][_PIPE]
@@ -186,10 +187,10 @@ def evaluate(chatId, s):
         while len(chats[chatId][_HIST]) > HISTORY_LEN:
             chats[chatId][_HIST].pop(HISTORY_LEN) # remove old commands
     except KeyError as e:
-        chatsLock.release()
         logging.exception(e)
         return
-    chatsLock.release()
+    finally:
+        chatsLock.release()
 
     try:
         p.stdin.write((s + "\n").encode('utf-8'))
@@ -225,23 +226,30 @@ def readResult(chatId):
             line = p.stdout.readline()
 
             chatsLock.acquire()
-            chats[chatId][_LOCK].acquire() # critical section start
-            # check condition for thread termination
-            if chats[chatId][_COND]:
-                chats[chatId][_LOCK].release()
+            try:
+                chats[chatId][_LOCK].acquire()
+                try:
+                    # check condition for thread termination
+                    if chats[chatId][_COND]:
+                        logging.debug(
+                                "reader thread for chat %d exiting"
+                                % (chatId))
+                        return
+
+                    # add line to the buffer
+                    text = chats[chatId][_MSG]
+                    chats[chatId][_MSG] = text + line.decode('utf-8')
+
+                except KeyError as e:
+                    logging.exception(e)
+                    continue
+
+                finally:
+                    chats[chatId][_LOCK].release()
+            finally:
                 chatsLock.release()
-                logging.debug("reading thread for chat %d exiting" % (chatId))
-                return
-            # add line to the buffer
-            text = chats[chatId][_MSG]
-            chats[chatId][_MSG] = text + line.decode('utf-8')
-        except KeyError as e:
-            chats[chatId][_LOCK].release() # critical section end
-            chatsLock.release()
+        except Exception as e:
             logging.exception(e)
-            continue
-        chats[chatId][_LOCK].release() # critical section end
-        chatsLock.release()
 
 def sendAnswer(chatId):
     """ Send answer messages.
@@ -251,24 +259,27 @@ def sendAnswer(chatId):
     """
     while True:
         chatsLock.acquire()
-        chats[chatId][_LOCK].acquire() # critical section start
         try:
-            # check condition for thread termination
-            if chats[chatId][_COND]:
+            chats[chatId][_LOCK].acquire()
+            try:
+                # check condition for thread termination
+                if chats[chatId][_COND]:
+                    logging.debug(
+                            "sender thread for chat %d exiting"
+                            % (chatId))
+                    return
+                # read message buffer for the chat and clear it after
+                msg = chats[chatId][_MSG]
+                chats[chatId][_MSG] = ""
+
+            except Exception as e:
+                logging.exception(e)
+
+            finally:
                 chats[chatId][_LOCK].release()
-                chatsLock.release()
-                logging.debug("sender thread for chat %d exiting" % (chatId))
-                return
-            # read message buffer for the chat and clear it after
-            msg = chats[chatId][_MSG]
-            chats[chatId][_MSG] = ""
-        except Exception as e:
-            chats[chatId][_LOCK].release()
+        finally:
             chatsLock.release()
-            logging.exception(e)
-            pass
-        chats[chatId][_LOCK].release() # critical section end
-        chatsLock.release()
+
         # send message
         if msg != "":
             sendMessage(chatId, msg)
@@ -283,14 +294,15 @@ def clearChat(chatId):
         chatId - id of the chat
     """
     chat = None
+
     chatsLock.acquire()
     try:
         chat = chats[chatId]
     except KeyError as e:
-        chatsLock.release()
         logging.exception(e)
         return
-    chatsLock.release()
+    finally:
+        chatsLock.release()
 
     # close ocaml shell process
     p = chat[_PIPE]
@@ -298,6 +310,7 @@ def clearChat(chatId):
     try:
         p.wait(2)
     except Exception as e:
+        # if termination hangs, use the force
         logging.exception(e)
         os.killpg(p.pid, signal.SIGKILL)
         p.wait()
@@ -333,16 +346,16 @@ def chatTimeoutKiller():
         try:
             inact = [c for (k, c) in chats.items() if t - c[_LAST] > _TIMEOUT]
         except Exception as e:
-            chatsLock.release()
             logging.exception(e)
             continue
-        chatsLock.release()
+        finally:
+            chatsLock.release()
 
         # clear inactive chats
         for chat in inact:
             clearChat(chat[_ID])
 
-        logging.info("Finished chatTimeoutKiller")
+        logging.info("Exiting chatTimeoutKiller")
 
 def runFromHistory(chatId, index):
     """ Run a command from the chat history.
@@ -356,10 +369,10 @@ def runFromHistory(chatId, index):
     try:
         command = chats[chatId][_HIST][index - 1] # `index` is one based
     except Exception as e:
-        chatsLock.release()
         logging.exception(e)
         return
-    chatsLock.release()
+    finally:
+        chatsLock.release()
 
     # send input to the shell
     evaluate(chatId, command)
@@ -385,10 +398,10 @@ def showHistory(chatId):
             msg = msg + "%d)  " % (i) + c + "\n"
             i = i + 1
     except Exception as e:
-        chatsLock.release()
         logging.exception(e)
         return
-    chatsLock.release()
+    finally:
+        chatsLock.release()
 
     if not commandsNumber:
         msg = msg + "none"
@@ -491,13 +504,14 @@ while True:
 
             if re.match("^/help.*", msg):
                 # show help
-                res = ("Hi. I am a very boring bot, who likes to talk in " +
-                       "OCaml only. My available commands are:\n" +
-                       "  /help — show this help message\n" +
-                       "  /kill — close the OCaml shell in use\n" +
-                       "  /hist [n] — show command history, or execute " +
-                                      "the n-th command from the history\n" +
-                       "  /ml [code] — parse OCaml code (the code can span " +
+                res = ("Hi. I am a very boring bot, who likes to talk in "
+                       "OCaml only. My available commands are:\n"
+                       "  /help — show this help message\n"
+                       "  /kill — close the OCaml shell in use\n"
+                       "  /hist [n] — show command history, or execute "
+                                      "the n-th most recent command from the "
+                                      "history\n"
+                       "  /ml [code] — parse OCaml code (the code can span "
                                       "across many \ml commands)")
                 sendMessage(chatId, res)
                 continue
@@ -524,7 +538,7 @@ while True:
             # fiter potentially dangerous intructions
             match = hazard.match(msg)
             if match:
-                res = ("Sorry, your code seems to contain a " +
+                res = ("Sorry, your code seems to contain a "
                        "forbidden identifier: %s" % match.group(1))
                 sendMessage(chatId, res)
                 continue
