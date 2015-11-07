@@ -41,6 +41,7 @@
 # Written by Martino on 2015-10-26
 """
 
+import json
 import logging
 import os
 import re
@@ -57,6 +58,9 @@ _TIMEOUT = 86400 # default: 1 day
 
 # Time between two calls of inactive chats killer.
 _TIMEOUT_KILLING_INTERVAL = 1800 # half hour
+
+# Size of the command history.
+HISTORY_LEN = 20
 
 # Level for the log.
 logLevel = logging.NOTSET
@@ -136,20 +140,29 @@ _LAST = 4 # Timestamp of the last received command.
 _COND = 5 # Exit condition for the chat threads.
 _READ_THREAD = 6 # Thread reading OCaml shell output.
 _SEND_THREAD = 7 # Thread sending answer messages.
-_ID = 8 # Chat id.
+_ID = 8   # Chat id.
+_HIST = 9 # Command history.
 
-def sendMessage(chatId, msg):
+def sendMessage(chatId, msg, args={}):
     """ Send `msg` to the `chatId` chat.
+
     Parameters:
         chatId - id of the chat
         msg    - message to be sent
+        args   - dictionary containing eventual extra parameters for the request
     """
+    # get eventual parameters
+    parameters = ""
+    for (k, v) in args.items():
+        parameters = parameters + "&%s=%s" % (str(k), str(v))
+    # HTTP request to send the message
     try:
         a = requests.post(url=
                 baseAddr +
                 "/sendMessage" +
                 "?chat_id=%s" % (chatId) +
-                "&text=%s" % (requests.utils.quote(msg)),
+                "&text=%s" % (requests.utils.quote(msg)) +
+                parameters,
                 timeout=120)
     except Exception as e:
         logging.exception(e)
@@ -159,14 +172,19 @@ def sendMessage(chatId, msg):
 
 def evaluate(chatId, s):
     """ Evaluate OCaml code and write the output in the pipe.
+
     Parameters:
         chatId - id of the chat
         s      - string to be evaluated by the OCaml shell
     """
+    # Get the pipe object for the chat, and add the command to the history.
     p = None
     chatsLock.acquire()
     try:
         p = chats[chatId][_PIPE]
+        chats[chatId][_HIST].insert(0, s) # add to history
+        while len(chats[chatId][_HIST]) > HISTORY_LEN:
+            chats[chatId][_HIST].pop(HISTORY_LEN) # remove old commands
     except KeyError as e:
         chatsLock.release()
         logging.exception(e)
@@ -197,6 +215,7 @@ def evaluate(chatId, s):
 
 def readResult(chatId):
     """ Read the output of the OCaml shell and store it into a string.
+
     Parameters:
         chatId - id of the chat
     """
@@ -226,6 +245,7 @@ def readResult(chatId):
 
 def sendAnswer(chatId):
     """ Send answer messages.
+
     Parameters:
         chatId - id of the chat
     """
@@ -258,6 +278,9 @@ def sendAnswer(chatId):
 def clearChat(chatId):
     """ Close the OCaml shell related to the chat, kill the threads and remove
     the chat from the chats dictionary.
+
+    Parameters:
+        chatId - id of the chat
     """
     chat = None
     chatsLock.acquire()
@@ -321,6 +344,75 @@ def chatTimeoutKiller():
 
         logging.info("Finished chatTimeoutKiller")
 
+def runFromHistory(chatId, index):
+    """ Run a command from the chat history.
+
+    Parameters:
+        chatId - id of the chat
+        index  - index of the OCaml input into the history
+    """
+    # retrieve input from the history
+    chatsLock.acquire()
+    try:
+        command = chats[chatId][_HIST][index - 1] # `index` is one based
+    except Exception as e:
+        chatsLock.release()
+        logging.exception(e)
+        return
+    chatsLock.release()
+
+    # send input to the shell
+    evaluate(chatId, command)
+
+def showHistory(chatId):
+    """ Send a message containing the command history, showing a custom
+    keyboard to easily select the command.
+
+    Parameters:
+        chatId - id of the chat
+    """
+    rowLen = 4 # number of keys in a row
+    kbd = None
+    commandsNumber = 0
+    msg = "Last %d inputs (from newest to oldest):\n" % (HISTORY_LEN)
+
+    # add history of the inputs to the answer message
+    chatsLock.acquire()
+    try:
+        i = 1
+        commandsNumber = len(chats[chatId][_HIST])
+        for c in chats[chatId][_HIST]:
+            msg = msg + "%d)  " % (i) + c + "\n"
+            i = i + 1
+    except Exception as e:
+        chatsLock.release()
+        logging.exception(e)
+        return
+    chatsLock.release()
+
+    if not commandsNumber:
+        msg = msg + "none"
+    else:
+        # create a keyboard with history entries
+        # see https://core.telegram.org/bots/api#replykeyboardmarkup
+        keyboard = []
+        k = 1
+        for i in range(0, (commandsNumber - 1) // rowLen + 1):
+            keyboard.append([])
+            for j in range(0, rowLen):
+                if k <= commandsNumber:
+                    keyboard[i].append("/hist %d" % (k))
+                    k = k + 1
+        kbd = {
+            'keyboard': keyboard,
+            'resize_keyboard': True,
+            'one_time_keyboard': True,
+            'selective': False
+        }
+
+    # send the message
+    sendMessage(chatId, msg, args={"reply_markup": json.dumps(kbd)})
+
 ### Application entry point
 
 # Launch a thread which periodically kills the inactive chats.
@@ -377,7 +469,8 @@ while True:
                     _PIPE: p,
                     _MSG: "",
                     _LOCK: threading.Lock(),
-                    _COND: False
+                    _COND: False,
+                    _HIST: []
                 }
 
                 # create thread to read shell's output
@@ -399,11 +492,13 @@ while True:
             if re.match("^/help.*", msg):
                 # show help
                 res = ("Hi. I am a very boring bot, who likes to talk in " +
-                       "OCaml only. My available commands are:\n"
-                       "  /help      - show this help message\n" +
-                       "  /kill      - close the OCaml shell in use\n" +
-                       "  /ml [code] - parse OCaml code (code can continue " +
-                       "               between many \ml commands)")
+                       "OCaml only. My available commands are:\n" +
+                       "  /help — show this help message\n" +
+                       "  /kill — close the OCaml shell in use\n" +
+                       "  /hist [n] — show command history, or execute " +
+                                      "the n-th command from the history\n" +
+                       "  /ml [code] — parse OCaml code (the code can span " +
+                                      "across many \ml commands)")
                 sendMessage(chatId, res)
                 continue
 
@@ -411,6 +506,14 @@ while True:
                 # close the chat and destroy its resources
                 clearChat(chatId)
                 continue
+
+            # show history or run a command from history
+            histMatch = re.match("^/hist\s*([0-9]*).*", msg)
+            if histMatch:
+                if histMatch.group(1) != "":
+                    runFromHistory(chatId, int(histMatch.group(1)))
+                else:
+                    showHistory(chatId)
 
             match = instruction.match(msg)
             if not match:
