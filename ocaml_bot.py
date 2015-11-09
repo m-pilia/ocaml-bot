@@ -367,12 +367,17 @@ def runFromHistory(chatId, index):
     # retrieve input from the history
     chatsLock.acquire()
     try:
+        if index - 1 not in range(0, len(chats[chatId][_HIST])):
+            return
         command = chats[chatId][_HIST][index - 1] # `index` is one based
     except Exception as e:
         logging.exception(e)
         return
     finally:
         chatsLock.release()
+
+    # send a copy of the OCaml input from the history
+    sendMessage(chatId, command)
 
     # send input to the shell
     evaluate(chatId, command)
@@ -384,16 +389,16 @@ def showHistory(chatId):
     Parameters:
         chatId - id of the chat
     """
-    rowLen = 4 # number of keys in a row
+    ROW_LEN = 4 # number of keys in a row
     kbd = None
-    commandsNumber = 0
     msg = "Last %d inputs (from newest to oldest):\n" % (HISTORY_LEN)
 
     # add history of the inputs to the answer message
     chatsLock.acquire()
     try:
         i = 1
-        commandsNumber = len(chats[chatId][_HIST])
+        if not len(chats[chatId][_HIST]):
+            msg = msg + "none"
         for c in chats[chatId][_HIST]:
             msg = msg + "%d)  " % (i) + c + "\n"
             i = i + 1
@@ -403,25 +408,23 @@ def showHistory(chatId):
     finally:
         chatsLock.release()
 
-    if not commandsNumber:
-        msg = msg + "none"
-    else:
-        # create a keyboard with history entries
-        # see https://core.telegram.org/bots/api#replykeyboardmarkup
-        keyboard = []
-        k = 1
-        for i in range(0, (commandsNumber - 1) // rowLen + 1):
-            keyboard.append([])
-            for j in range(0, rowLen):
-                if k <= commandsNumber:
-                    keyboard[i].append("/hist %d" % (k))
-                    k = k + 1
-        kbd = {
-            'keyboard': keyboard,
-            'resize_keyboard': True,
-            'one_time_keyboard': True,
-            'selective': False
-        }
+    # Create a keyboard with history entries. The keyboard has HISTORY_LEN keys
+    # divided into rows of ROW_LEN length each.
+    # see https://core.telegram.org/bots/api#replykeyboardmarkup
+    keyboard = []
+    k = 1
+    for i in range(0, (HISTORY_LEN - 1) // ROW_LEN + 1):
+        keyboard.append([])
+        for j in range(0, ROW_LEN):
+            if k <= HISTORY_LEN:
+                keyboard[i].append("/hist %d" % (k))
+                k = k + 1
+    kbd = {
+        'keyboard': keyboard,
+        'resize_keyboard': True,
+        'one_time_keyboard': True,
+        'selective': False
+    }
 
     # send the message
     sendMessage(chatId, msg, args={"reply_markup": json.dumps(kbd)})
